@@ -1,20 +1,23 @@
 from typing import Any
 import httpx
+import os
 from mcp.server.fastmcp import FastMCP
 
 # Initialize FastMCP server
 mcp = FastMCP("weather")
 
 # Constants
-NWS_API_BASE = "https://api.weather.gov"
-USER_AGENT = "weather-app/1.0"
+OPENWEATHER_API_BASE = "https://api.openweathermap.org/data/2.5"
+API_KEY = os.getenv("OPENWEATHER_API_KEY")
+if not API_KEY:
+    raise ValueError("OPENWEATHER_API_KEY environment variable is required")
 
-async def make_nws_request(url: str) -> dict[str, Any] | None:
-    """Make a request to the NWS API with proper error handling."""
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/geo+json"
-    }
+async def make_ow_request(endpoint: str, params: dict = None) -> dict[str, Any] | None:
+    """Make a request to the OpenWeather API with proper error handling."""
+    if params is None:
+        params = {}
+    params["appid"] = API_KEY
+    params["units"] = "metric"
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, headers=headers, timeout=30.0)
@@ -35,57 +38,65 @@ Instructions: {props.get('instruction', 'No specific instructions provided')}
 """
 
 @mcp.tool()
-async def get_alerts(state: str) -> str:
-    """Get weather alerts for a US state.
+async def get_alerts(location: str) -> str:
+    """Get weather alerts for a location.
 
     Args:
-        state: Two-letter US state code (e.g. CA, NY)
+        location: City name and country code (e.g. "London,uk")
     """
-    url = f"{NWS_API_BASE}/alerts/active/area/{state}"
-    data = await make_nws_request(url)
+    url = f"{OPENWEATHER_API_BASE}/weather"
+    data = await make_ow_request(url, {"q": location})
 
-    if not data or "features" not in data:
-        return "Unable to fetch alerts or no alerts found."
+    if not data:
+        return "Unable to fetch weather data for this location."
 
-    if not data["features"]:
-        return "No active alerts for this state."
+    # OpenWeather doesn't provide detailed alerts in free tier
+    # So we'll return current weather warnings if any
+    if "weather" not in data:
+        return "No weather alerts for this location."
 
-    alerts = [format_alert(feature) for feature in data["features"]]
+    alerts = []
+    for weather in data["weather"]:
+        if weather["main"] in ["Thunderstorm", "Tornado", "Hurricane"]:
+            alert = f"""
+Severe Weather Alert: {weather['main']}
+Description: {weather['description']}
+"""
+            alerts.append(alert)
+
+    if not alerts:
+        return "No active weather alerts for this location."
+
     return "\n---\n".join(alerts)
 
 @mcp.tool()
-async def get_forecast(latitude: float, longitude: float) -> str:
+async def get_forecast(location: str) -> str:
     """Get weather forecast for a location.
 
     Args:
-        latitude: Latitude of the location
-        longitude: Longitude of the location
+        location: City name and country code (e.g. "London,uk")
     """
-    # First get the forecast grid endpoint
-    points_url = f"{NWS_API_BASE}/points/{latitude},{longitude}"
-    points_data = await make_nws_request(points_url)
+    url = f"{OPENWEATHER_API_BASE}/forecast"
+    data = await make_ow_request(url, {"q": location})
 
-    if not points_data:
+    if not data:
         return "Unable to fetch forecast data for this location."
 
-    # Get the forecast URL from the points response
-    forecast_url = points_data["properties"]["forecast"]
-    forecast_data = await make_nws_request(forecast_url)
-
-    if not forecast_data:
-        return "Unable to fetch detailed forecast."
-
-    # Format the periods into a readable forecast
-    periods = forecast_data["properties"]["periods"]
+    # Format the forecast data
     forecasts = []
-    for period in periods[:5]:  # Only show next 5 periods
-        forecast = f"""
-{period['name']}:
-Temperature: {period['temperature']}°{period['temperatureUnit']}
-Wind: {period['windSpeed']} {period['windDirection']}
-Forecast: {period['detailedForecast']}
+    for forecast in data["list"][:5]:  # Only show next 5 forecasts (every 3 hours)
+        dt = forecast["dt_txt"]
+        temp = forecast["main"]["temp"]
+        desc = forecast["weather"][0]["description"]
+        wind_speed = forecast["wind"]["speed"]
+        
+        forecast_str = f"""
+{dt}:
+Temperature: {temp}°C
+Conditions: {desc}
+Wind Speed: {wind_speed} m/s
 """
-        forecasts.append(forecast)
+        forecasts.append(forecast_str)
 
     return "\n---\n".join(forecasts)
 
